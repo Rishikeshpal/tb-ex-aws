@@ -38,10 +38,6 @@ Production-ready AWS infrastructure setup with networking, database, load balanc
 ## Quick Start
 
 ```bash
-# Clone and configure
-cd terraform-aws-infrastructure
-cp terraform.tfvars.example terraform.tfvars
-vim terraform.tfvars  # Set your db_password and region
 
 # Deploy
 terraform init

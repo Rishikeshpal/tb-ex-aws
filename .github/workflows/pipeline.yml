@@ -1,0 +1,334 @@
+#------------------------------------------------------------------------------
+# Smart CI/CD Pipeline - Conditional Terraform Execution
+#------------------------------------------------------------------------------
+# This pipeline executes terraform plan based on which files changed:
+# - Changes to apps/payment-api → Plan for Payment API only
+# - Changes to apps/user-api → Plan for User API only
+# - Changes to global/* → Plan for ALL apps (checks downstream breakage)
+# - Changes to CHANGELOG.md only → Exit successfully, no Terraform runs
+#------------------------------------------------------------------------------
+
+name: Smart Terraform Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
+
+# Prevent concurrent runs on the same branch to avoid state file conflicts
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.6.0"
+  AWS_REGION: "us-east-1"
+
+jobs:
+  #----------------------------------------------------------------------------
+  # Job 1: Detect Changes - Determines which modules were modified
+  #----------------------------------------------------------------------------
+  detect-changes:
+    name: Detect Changed Modules
+    runs-on: ubuntu-latest
+    outputs:
+      payment_api_changed: ${{ steps.changes.outputs.payment_api }}
+      user_api_changed: ${{ steps.changes.outputs.user_api }}
+      global_iam_changed: ${{ steps.changes.outputs.global_iam }}
+      global_s3_changed: ${{ steps.changes.outputs.global_s3 }}
+      only_changelog: ${{ steps.changes.outputs.only_changelog }}
+      apps_to_plan: ${{ steps.matrix.outputs.apps }}
+      should_run: ${{ steps.matrix.outputs.should_run }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect file changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            payment_api:
+              - 'apps/payment-api/**'
+            user_api:
+              - 'apps/user-api/**'
+            global_iam:
+              - 'global/iam/**'
+            global_s3:
+              - 'global/s3/**'
+            only_changelog:
+              - 'CHANGELOG.md'
+            any_terraform:
+              - 'apps/**'
+              - 'global/**'
+
+      - name: Build execution matrix
+        id: matrix
+        run: |
+          # Initialize arrays
+          APPS_TO_PLAN='[]'
+          SHOULD_RUN="false"
+          
+          # Check if only CHANGELOG.md changed (and nothing else)
+          if [[ "${{ steps.changes.outputs.only_changelog }}" == "true" && \
+                "${{ steps.changes.outputs.any_terraform }}" == "false" ]]; then
+            echo "Only CHANGELOG.md changed - skipping Terraform execution"
+            echo "apps=$APPS_TO_PLAN" >> $GITHUB_OUTPUT
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # If global infrastructure changed, plan ALL apps
+          if [[ "${{ steps.changes.outputs.global_iam }}" == "true" || \
+                "${{ steps.changes.outputs.global_s3 }}" == "true" ]]; then
+            echo "Global infrastructure changed - planning ALL apps"
+            APPS_TO_PLAN='["payment-api", "user-api"]'
+            SHOULD_RUN="true"
+          else
+            # Build list of changed apps
+            APPS=()
+            
+            if [[ "${{ steps.changes.outputs.payment_api }}" == "true" ]]; then
+              echo "Payment API changed"
+              APPS+=("payment-api")
+            fi
+            
+            if [[ "${{ steps.changes.outputs.user_api }}" == "true" ]]; then
+              echo "User API changed"
+              APPS+=("user-api")
+            fi
+            
+            # Convert bash array to JSON array
+            if [[ ${#APPS[@]} -gt 0 ]]; then
+              APPS_TO_PLAN=$(printf '%s\n' "${APPS[@]}" | jq -R . | jq -s .)
+              SHOULD_RUN="true"
+            fi
+          fi
+          
+          echo "Apps to plan: $APPS_TO_PLAN"
+          echo "apps=$APPS_TO_PLAN" >> $GITHUB_OUTPUT
+          echo "should_run=$SHOULD_RUN" >> $GITHUB_OUTPUT
+
+      - name: Summary - Change Detection Results
+        run: |
+          echo "## 📊 Change Detection Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Changed |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Payment API | ${{ steps.changes.outputs.payment_api }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| User API | ${{ steps.changes.outputs.user_api }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Global IAM | ${{ steps.changes.outputs.global_iam }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Global S3 | ${{ steps.changes.outputs.global_s3 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| CHANGELOG Only | ${{ steps.changes.outputs.only_changelog }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Execution Decision" >> $GITHUB_STEP_SUMMARY
+          echo "- **Should Run Terraform:** ${{ steps.matrix.outputs.should_run }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Apps to Plan:** ${{ steps.matrix.outputs.apps }}" >> $GITHUB_STEP_SUMMARY
+
+  #----------------------------------------------------------------------------
+  # Job 2: Plan Global Infrastructure (if changed)
+  #----------------------------------------------------------------------------
+  plan-global:
+    name: Plan Global Infrastructure
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: |
+      needs.detect-changes.outputs.global_iam_changed == 'true' ||
+      needs.detect-changes.outputs.global_s3_changed == 'true'
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [iam, s3]
+        exclude:
+          - module: ${{ needs.detect-changes.outputs.global_iam_changed != 'true' && 'iam' || 'none' }}
+          - module: ${{ needs.detect-changes.outputs.global_s3_changed != 'true' && 's3' || 'none' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init - Global ${{ matrix.module }}
+        working-directory: global/${{ matrix.module }}
+        run: terraform init
+
+      - name: Terraform Plan - Global ${{ matrix.module }}
+        id: plan
+        working-directory: global/${{ matrix.module }}
+        run: |
+          terraform plan -no-color -out=tfplan 2>&1 | tee plan_output.txt
+          echo "plan_output<<EOF" >> $GITHUB_OUTPUT
+          cat plan_output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Plan Output to Job Summary
+        run: |
+          echo "## 🌐 Global ${{ matrix.module }} - Terraform Plan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary>Click to expand plan output</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```hcl' >> $GITHUB_STEP_SUMMARY
+          cat global/${{ matrix.module }}/plan_output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+      - name: Check Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  #----------------------------------------------------------------------------
+  # Job 3: Matrix Execution - Plan Apps Based on Changes
+  #----------------------------------------------------------------------------
+  plan-apps:
+    name: Plan ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.should_run == 'true'
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJson(needs.detect-changes.outputs.apps_to_plan) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Init - ${{ matrix.app }}
+        working-directory: apps/${{ matrix.app }}
+        run: terraform init
+
+      - name: Terraform Validate - ${{ matrix.app }}
+        working-directory: apps/${{ matrix.app }}
+        run: terraform validate
+
+      - name: Terraform Plan - ${{ matrix.app }}
+        id: plan
+        working-directory: apps/${{ matrix.app }}
+        run: |
+          terraform plan -no-color -out=tfplan 2>&1 | tee plan_output.txt
+          
+          # Extract plan summary
+          PLAN_SUMMARY=$(grep -E "Plan:|No changes" plan_output.txt || echo "Plan completed")
+          echo "summary=$PLAN_SUMMARY" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Plan Output to Job Summary
+        run: |
+          echo "## 📦 ${{ matrix.app }} - Terraform Plan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Add status badge
+          if [[ "${{ steps.plan.outcome }}" == "success" ]]; then
+            echo "**Status:** ✅ Success" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Status:** ❌ Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Add trigger reason
+          if [[ "${{ needs.detect-changes.outputs.global_iam_changed }}" == "true" || \
+                "${{ needs.detect-changes.outputs.global_s3_changed }}" == "true" ]]; then
+            echo "**Trigger:** Global infrastructure change (downstream impact check)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Trigger:** Direct changes to ${{ matrix.app }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "<details><summary>📋 Click to expand full plan output</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```hcl' >> $GITHUB_STEP_SUMMARY
+          cat apps/${{ matrix.app }}/plan_output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ matrix.app }}
+          path: apps/${{ matrix.app }}/tfplan
+          retention-days: 5
+
+      - name: Check Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  #----------------------------------------------------------------------------
+  # Job 4: Skip Job - Runs when only CHANGELOG.md changed
+  #----------------------------------------------------------------------------
+  skip-terraform:
+    name: Skip Terraform (No Infrastructure Changes)
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.should_run == 'false'
+
+    steps:
+      - name: Report Skip
+        run: |
+          echo "## ⏭️ Terraform Execution Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "No infrastructure changes detected." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The following non-infrastructure files were modified:" >> $GITHUB_STEP_SUMMARY
+          echo "- CHANGELOG.md" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Result:** Pipeline completed successfully without running Terraform." >> $GITHUB_STEP_SUMMARY
+
+  #----------------------------------------------------------------------------
+  # Job 5: Final Summary
+  #----------------------------------------------------------------------------
+  summary:
+    name: Pipeline Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [detect-changes, plan-global, plan-apps, skip-terraform]
+
+    steps:
+      - name: Generate Final Summary
+        run: |
+          echo "## 📊 Pipeline Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Change Detection | ${{ needs.detect-changes.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Plan Global | ${{ needs.plan-global.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Plan Apps | ${{ needs.plan-apps.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Skip (No Changes) | ${{ needs.skip-terraform.result || 'skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Actor:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY

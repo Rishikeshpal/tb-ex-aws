@@ -1,0 +1,47 @@
+# Example Terraform Variables File
+# Copy this file to terraform.tfvars and update with your values
+
+#------------------------------------------------------------------------------
+# General Configuration
+#------------------------------------------------------------------------------
+aws_region   = "us-east-1"
+project_name = "webapp"
+environment  = "dev"
+
+#------------------------------------------------------------------------------
+# VPC Configuration
+#------------------------------------------------------------------------------
+vpc_cidr = "192.168.0.0/16"
+
+availability_zones = [
+  "us-east-1a",
+  "us-east-1b"
+]
+
+public_subnet_cidrs = [
+  "192.168.1.0/24",
+  "192.168.2.0/24"
+]
+
+private_subnet_cidrs = [
+  "192.168.3.0/24",
+  "192.168.4.0/24"
+]
+
+#------------------------------------------------------------------------------
+# RDS Configuration
+#------------------------------------------------------------------------------
+db_name              = "appdb"
+db_username          = "dbadmin"
+db_password          = "CHANGE_ME_TO_SECURE_PASSWORD"  # Use AWS Secrets Manager in production
+db_instance_class    = "db.t3.micro"
+db_allocated_storage = 20
+db_engine_version    = "15.4"
+
+#------------------------------------------------------------------------------
+# EC2/ASG Configuration
+#------------------------------------------------------------------------------
+instance_type        = "t3.micro"
+asg_min_size         = 1
+asg_max_size         = 3
+asg_desired_capacity = 1

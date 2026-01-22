@@ -1,234 +1,131 @@
 # Terraform AWS Infrastructure
 
-A comprehensive AWS infrastructure deployment with VPC, RDS PostgreSQL, ALB, Auto Scaling Group, and a Smart CI/CD Pipeline.
+Production-ready AWS infrastructure setup with networking, database, load balancing, and auto-scaling. Built following AWS best practices and DRY principles using official Terraform modules.
 
-## Architecture Overview
+## What's Included
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              VPC (192.168.0.0/16)                           │
-├─────────────────────────────────┬───────────────────────────────────────────┤
-│         Public Subnets          │            Private Subnets                │
-│  ┌─────────────┬─────────────┐  │  ┌─────────────┬─────────────┐           │
-│  │ 192.168.1.0 │ 192.168.2.0 │  │  │ 192.168.3.0 │ 192.168.4.0 │           │
-│  │    /24      │    /24      │  │  │    /24      │    /24      │           │
-│  │   (AZ-1)    │   (AZ-2)    │  │  │   (AZ-1)    │   (AZ-2)    │           │
-│  └──────┬──────┴──────┬──────┘  │  └──────┬──────┴──────┬──────┘           │
-│         │             │         │         │             │                   │
-│    ┌────┴─────────────┴────┐    │    ┌────┴─────────────┴────┐             │
-│    │  Application Load     │    │    │   Auto Scaling Group  │             │
-│    │     Balancer (ALB)    │    │    │   (EC2 with Nginx)    │             │
-│    │       Port 80         │    │    │     t3.micro          │             │
-│    └───────────────────────┘    │    │    min:1 max:3        │             │
-│              │                  │    └───────────────────────┘             │
-│              │                  │              │                            │
-│    ┌─────────┴─────────┐        │              │                            │
-│    │  Internet Gateway │        │    ┌─────────┴─────────┐                  │
-│    └───────────────────┘        │    │  PostgreSQL RDS   │                  │
-│                                 │    │   db.t3.micro     │                  │
-│                                 │    │  (Private Only)   │                  │
-│                                 │    └───────────────────┘                  │
-└─────────────────────────────────┴───────────────────────────────────────────┘
-```
+- **Networking**: VPC with public/private subnet separation across 2 AZs
+- **Database**: PostgreSQL RDS in private subnets (no public access)
+- **Compute**: Auto Scaling Group with Nginx on Amazon Linux 2023
+- **Load Balancing**: Application Load Balancer with health checks
+- **CI/CD**: Smart pipeline that only runs Terraform on changed modules
 
-## Project Structure
+## Architecture
 
 ```
-terraform-aws-infrastructure/
-├── .github/
-│   └── workflows/
-│       └── pipeline.yml          # Smart CI/CD pipeline
-├── global/
-│   ├── iam/                      # Shared IAM policies
-│   │   └── main.tf
-│   └── s3/                       # Shared state storage
-│       └── main.tf
-├── apps/
-│   ├── payment-api/              # Payment Service
-│   │   └── main.tf
-│   └── user-api/                 # User Service
-│       └── main.tf
-├── alb.tf                        # Application Load Balancer
-├── asg.tf                        # Auto Scaling Group & Launch Template
-├── outputs.tf                    # Output definitions
-├── rds.tf                        # RDS PostgreSQL
-├── security-groups.tf            # Security group definitions
-├── variables.tf                  # Variable definitions
-├── versions.tf                   # Provider configuration
-├── vpc.tf                        # VPC, subnets, routing
-├── terraform.tfvars.example      # Example variables
-├── CHANGELOG.md                  # Change log
-└── README.md                     # This file
+                         Internet
+                            │
+                    ┌───────┴───────┐
+                    │  Internet GW  │
+                    └───────┬───────┘
+                            │
+           ┌────────────────┴────────────────┐
+           │            VPC                  │
+           │        192.168.0.0/16           │
+           │                                 │
+    ┌──────┴──────┐                ┌─────────┴─────────┐
+    │   Public    │                │     Private       │
+    │  Subnets    │                │     Subnets       │
+    │             │                │                   │
+    │    ALB      │───────────────▶│   EC2 (Nginx)    │
+    │             │                │   ASG 1-3        │
+    │  NAT GWs    │                │                   │
+    └─────────────┘                │   PostgreSQL     │
+                                   │   (RDS)          │
+                                   └───────────────────┘
 ```
 
-## Part 1: Foundation (VPC, Subnets, RDS)
+## Quick Start
 
-### VPC Configuration
-- **CIDR Block:** 192.168.0.0/16
-- **DNS Hostnames:** Enabled
-- **DNS Support:** Enabled
+```bash
+# Clone and configure
+cd terraform-aws-infrastructure
+cp terraform.tfvars.example terraform.tfvars
+vim terraform.tfvars  # Set your db_password and region
 
-### Subnets
-| Type    | CIDR           | Availability Zone |
-|---------|----------------|-------------------|
-| Public  | 192.168.1.0/24 | us-east-1a       |
-| Public  | 192.168.2.0/24 | us-east-1b       |
-| Private | 192.168.3.0/24 | us-east-1a       |
-| Private | 192.168.4.0/24 | us-east-1b       |
+# Deploy
+terraform init
+terraform plan
+terraform apply
+```
 
-### Routing
-- **Public Route Table:** Routes 0.0.0.0/0 → Internet Gateway
-- **Private Route Tables:** Routes 0.0.0.0/0 → NAT Gateway (per AZ)
+## Project Layout
 
-### RDS PostgreSQL
-- **Instance Class:** db.t3.micro
-- **Engine:** PostgreSQL 15.4
-- **Placement:** Private subnets only
-- **Security:** Accepts traffic only from VPC CIDR (192.168.0.0/16)
-- **Publicly Accessible:** No
+```
+.
+├── vpc.tf              # VPC module config (public/private subnets, NAT, IGW)
+├── rds.tf              # PostgreSQL database
+├── alb.tf              # Load balancer with target groups
+├── asg.tf              # Launch template + Auto Scaling Group
+├── security-groups.tf  # All security group definitions
+├── variables.tf        # Input variables
+├── outputs.tf          # Useful outputs (endpoints, IDs, etc.)
+├── global/             # Shared infra (IAM, S3 state bucket)
+├── apps/               # Service-specific modules
+│   ├── payment-api/
+│   └── user-api/
+└── .github/workflows/  # CI/CD pipeline
+```
 
-## Part 2: Application Layer (ALB, ASG, Nginx)
+## Configuration
 
-### Application Load Balancer
-- Uses official `terraform-aws-modules/alb/aws` module
-- HTTP listener on Port 80
-- Deployed in public subnets
+Key variables you'll want to set:
 
-### Target Group Health Check
-- **Path:** `/`
-- **Expected Response:** 200
-- **Interval:** 30 seconds
-- **Healthy Threshold:** 2
-- **Unhealthy Threshold:** 2
+| Variable | What it does | Default |
+|----------|--------------|---------|
+| `aws_region` | Where to deploy | us-east-1 |
+| `project_name` | Prefix for all resources | webapp |
+| `environment` | Environment tag (dev/staging/prod) | dev |
+| `db_password` | RDS master password | *required* |
+| `asg_min_size` | Minimum EC2 instances | 1 |
+| `asg_max_size` | Maximum EC2 instances | 3 |
 
-### Launch Template
-- **AMI:** Amazon Linux 2023 (latest)
-- **Instance Type:** t3.micro
-- **User Data:** Installs and configures Nginx
-- **IMDSv2:** Required
-- **EBS:** Encrypted gp3 volumes
+## Security Notes
 
-### Auto Scaling Group
-- **Minimum:** 1 instance
-- **Maximum:** 3 instances
-- **Desired:** 1 instance
-- **Health Check:** ELB-based
-- **Auto Scaling Policies:** CPU-based (80% up, 20% down)
+A few things worth mentioning:
 
-## Part 3: Smart CI/CD Pipeline
+- RDS is in private subnets with `publicly_accessible = false`
+- Database security group only allows connections from within the VPC (192.168.0.0/16)
+- EC2 instances are in private subnets, only accessible through the ALB
+- All EBS volumes and RDS storage are encrypted
+- IMDSv2 is required on EC2 instances
 
-### Problem Solved
-Prevents unnecessary Terraform plans and race conditions on state files by only running plans for changed modules.
+## The CI/CD Pipeline
 
-### Conditional Execution Logic
+The pipeline is designed to avoid the "run everything on every change" problem. It detects what changed and only plans/applies the relevant modules.
 
-| Change Detected | Action |
-|-----------------|--------|
-| `apps/payment-api/**` | Plan Payment API only |
-| `apps/user-api/**` | Plan User API only |
-| `global/iam/**` | Plan ALL apps (downstream check) |
-| `global/s3/**` | Plan ALL apps (downstream check) |
-| `CHANGELOG.md` only | Exit successfully, no Terraform |
+**How it works:**
 
-### Pipeline Features
-- **Matrix Execution:** Parallel plans for multiple apps
-- **Job Summary:** Plan results visible in GitHub Actions summary
-- **Concurrency Control:** Prevents race conditions on same branch
-- **Artifact Upload:** Plan files saved for potential apply
+- Change `apps/payment-api/*` → only plan payment-api
+- Change `apps/user-api/*` → only plan user-api
+- Change `global/*` → plan ALL apps (to catch breaking changes)
+- Change only `CHANGELOG.md` → skip Terraform entirely
 
-## Usage
+This prevents race conditions on state files and speeds up CI significantly.
 
-### Prerequisites
-- Terraform >= 1.5.0
-- AWS CLI configured with appropriate credentials
-- S3 bucket for remote state (for production)
+**Required GitHub Secrets:**
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
 
-### Quick Start
+## Modules Used
 
-1. **Clone and configure:**
-   ```bash
-   cd terraform-aws-infrastructure
-   cp terraform.tfvars.example terraform.tfvars
-   # Edit terraform.tfvars with your values
-   ```
+Using official Terraform AWS modules to keep things maintainable:
 
-2. **Initialize Terraform:**
-   ```bash
-   terraform init
-   ```
+- [terraform-aws-modules/vpc/aws](https://registry.terraform.io/modules/terraform-aws-modules/vpc/aws) - VPC, subnets, NAT gateways
+- [terraform-aws-modules/alb/aws](https://registry.terraform.io/modules/terraform-aws-modules/alb/aws) - Application Load Balancer
 
-3. **Review the plan:**
-   ```bash
-   terraform plan
-   ```
+## Outputs
 
-4. **Apply the infrastructure:**
-   ```bash
-   terraform apply
-   ```
+After `terraform apply`, you'll get:
 
-### Required Variables
+- `alb_dns_name` - Hit this URL to see Nginx running
+- `rds_endpoint` - Database connection string
+- `vpc_id`, `public_subnet_ids`, `private_subnet_ids` - For reference
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `aws_region` | AWS region | us-east-1 |
-| `project_name` | Project identifier | webapp |
-| `environment` | Environment name | dev |
-| `db_password` | RDS master password | (required) |
+## Cleanup
 
-### Outputs
+```bash
+terraform destroy
+```
 
-After applying, you'll receive:
-- VPC and subnet IDs
-- RDS endpoint and connection info
-- ALB DNS name
-- ASG name
-
-## Security Considerations
-
-1. **RDS Security:**
-   - Placed in private subnets
-   - No public accessibility
-   - Security group allows only VPC CIDR on port 5432
-
-2. **EC2 Security:**
-   - Placed in private subnets
-   - Only accepts traffic from ALB security group
-   - IMDSv2 required
-
-3. **Encryption:**
-   - RDS storage encrypted
-   - EBS volumes encrypted
-   - S3 buckets use server-side encryption
-
-4. **Network Isolation:**
-   - Public subnets: ALB only
-   - Private subnets: EC2 instances and RDS
-
-## CI/CD Pipeline Setup
-
-1. **Required GitHub Secrets:**
-   - `AWS_ACCESS_KEY_ID`
-   - `AWS_SECRET_ACCESS_KEY`
-
-2. **Pipeline Triggers:**
-   - Push to `main` or `feature/**` branches
-   - Pull requests to `main`
-
-3. **Workflow File:** `.github/workflows/pipeline.yml`
-
-## Cost Estimation
-
-| Resource | Type | Estimated Monthly Cost |
-|----------|------|------------------------|
-| NAT Gateway | 2x | ~$65/month |
-| RDS | db.t3.micro | ~$15/month |
-| EC2 | t3.micro (1-3) | ~$8-24/month |
-| ALB | Application | ~$16/month |
-| **Total** | | **~$104-120/month** |
-
-*Costs are estimates and may vary by region and usage.*
-
-## License
-
-MIT License - See LICENSE file for details.
+Note: `deletion_protection` is disabled by default for easy cleanup. Enable it for production.
